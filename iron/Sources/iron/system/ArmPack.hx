@@ -1,0 +1,249 @@
+// Msgpack parser with typed arrays
+// Based on https://github.com/aaulia/msgpack-haxe
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+package iron.system;
+
+import haxe.io.Bytes;
+import haxe.io.BytesInput;
+import haxe.io.BytesOutput;
+import haxe.io.Eof;
+import iron.data.SceneFormat;
+
+class ArmPack {
+
+	public static inline function decode(b:Bytes):Dynamic {
+		var i = new BytesInput(b);
+		i.bigEndian = false;
+		return read(i);
+	}
+
+	static function read(i:BytesInput, key = "", parentKey = ""):Dynamic {
+		try {
+			var b = i.readByte();
+			switch (b) {
+				case 0xc0: return null;
+				case 0xc2: return false;
+				case 0xc3: return true;
+
+				// binary
+				case 0xc4: return i.read(i.readByte());
+				case 0xc5: return i.read(i.readUInt16());
+				case 0xc6: return i.read(i.readInt32());
+
+				// floating point
+				case 0xca: return i.readFloat();
+				// case 0xcb: return i.readDouble(); // armpack.py forces 32bit floats
+				
+				// unsigned int
+				case 0xcc: return i.readByte();
+				case 0xcd: return i.readUInt16();
+				case 0xce: return i.readInt32();
+				// case 0xcf: throw "UInt64 not supported";
+
+				// signed int
+				case 0xd0: return i.readInt8();
+				case 0xd1: return i.readInt16();
+				case 0xd2: return i.readInt32();
+				// case 0xd3: {
+					// var high = i.readInt32();
+					// var low = i.readInt32();
+					// return Int64.make(high, low);
+				// }
+
+				// string
+				case 0xd9: return i.readString(i.readByte());
+				case 0xda: return i.readString(i.readUInt16());
+				case 0xdb: return i.readString(i.readInt32());
+
+				// array 16, 32
+				case 0xdc: return readArray(i, i.readUInt16(), key, parentKey);
+				case 0xdd: return readArray(i, i.readInt32(), key, parentKey);
+
+				// map 16, 32
+				case 0xde: return readMap(i, i.readUInt16(), key, parentKey);
+				case 0xdf: return readMap(i, i.readInt32(), key, parentKey);
+
+				default: {
+					if (b < 0x80) return b; // positive fix num
+					else if (b < 0x90) return readMap(i, (0xf & b), key, parentKey); // fix map
+					else if (b < 0xa0) return readArray(i, (0xf & b), key, parentKey); // fix array
+					else if (b < 0xc0) return i.readString(0x1f & b); // fix string
+					else if (b > 0xdf) return 0xffffff00 | b; // negative fix num
+				}
+			}
+		}
+		catch (e:Eof) {}
+		return null;
+	}
+
+	static function readArray(i:BytesInput, length:Int, key = "", parentKey = ""):Dynamic {
+		var b = i.readByte();
+		i.position--;
+
+		// Typed float32
+		if (b == 0xca) {
+			i.position++;
+			var a = new kha.arrays.Float32Array(length);
+			for (x in 0...length) a[x] = i.readFloat();
+			return a;
+		}
+		// Typed int32
+		else if (b == 0xd2) {
+			i.position++;
+			var a = new kha.arrays.Uint32Array(length);
+			for (x in 0...length) a[x] = i.readInt32();
+			return a;
+		}
+		// Typed int16
+		else if (b == 0xd1) {
+			i.position++;
+			var a = new kha.arrays.Int16Array(length);
+			for (x in 0...length) a[x] = i.readInt16();
+			return a;
+		}
+		// Dynamic type-value
+		else {
+			var a:Array<Dynamic> = [];
+			for(x in 0...length) a.push(read(i, key, parentKey));
+			return a;
+		}
+	}
+
+	static function readMap(i:BytesInput, length:Int, key = "", parentKey = ""):Dynamic {
+		#if js
+		var out = {};
+		#else
+		var out = Type.createEmptyInstance(getClass(key, parentKey));
+		#end
+		for (n in 0...length) {
+			var k = Std.string(read(i));
+			var v = read(i, k, key);
+			Reflect.setField(out, k, v);
+		}
+		return out;	
+	}
+
+	#if (!js)
+	static function getClass(key:String, parentKey:String):Class<Dynamic> {
+		return switch (key) {
+		case "": TSceneFormat;
+		case "mesh_datas": TMeshData;
+		case "light_datas": TLightData;
+		case "probe_datas": TProbeData;
+		case "probe": TProbeData;
+		case "camera_datas": TCameraData;
+		case "material_datas": TMaterialData;
+		case "particle_datas": TParticleData;
+		case "shader_datas": TShaderData;
+		case "speaker_datas": TSpeakerData;
+		case "world_datas": TWorldData;
+		case "terrain_datas": TTerrainData;
+		// case "grease_pencil_datas": TGreasePencilData;
+		// case "layers": TGreasePencilLayer;
+		// case "frames": TGreasePencilFrame;
+		// case "colors": TGreasePencilPaletteColor;
+		case "tilesheet_datas": TTilesheetData;
+		case "objects": TObj;
+		case "children": TObj;
+		case "groups": TGroup;
+		case "traits": TTrait;
+		case "properties": TProperty;
+		case "vertex_arrays": TVertexArray;
+		case "index_arrays": TIndexArray;
+		case "skin": TSkin;
+		case "transform": TTransform;
+		case "constraints": TConstraint;
+		case "contexts": parentKey == "material_datas" ? TMaterialContext : TShaderContext;
+		case "override_context": TShaderOverride;
+		case "bind_constants": TBindConstant;
+		case "bind_textures": TBindTexture;
+		case "vertex_elements": TVertexElement;
+		case "constants": TShaderConstant;
+		case "texture_units": TTextureUnit;
+		case "actions": TTilesheetAction;
+		case "particle_refs": TParticleReference;
+		case "lods": TLod;
+		case "anim": TAnimation;
+		case "tracks": TTrack;
+		case _: TSceneFormat;
+		}
+	}
+	#end
+
+	public static inline function encode(d:Dynamic):Bytes {
+		var o = new BytesOutput();
+		o.bigEndian = false;
+		write(o, d);
+		return o.getBytes();
+	}
+
+	static function write(o:BytesOutput, d:Dynamic) {
+		switch (Type.typeof(d)) {
+			case TNull: o.writeByte(0xc0);
+			case TBool: o.writeByte(d ? 0xc3 : 0xc2);
+			case TInt: { o.writeByte(0xd2); o.writeInt32(d); }
+			case TFloat: { o.writeByte(0xca); o.writeFloat(d); }
+			case TClass(c): {
+				switch (Type.getClassName(c)) {
+					case "String": {
+						o.writeByte(0xdb);
+						o.writeInt32(d.length);
+						o.writeString(d);
+					}
+					case "Array", null: { // Float32Array, Uint32Array gives null
+						o.writeByte(0xdd);
+						o.writeInt32(d.length);
+						var isInt = Std.is(d[0], Int);
+						var isFloat = Std.is(d[0], Float);
+
+						if (isFloat && !isInt) { // Float32Array
+							o.writeByte(0xca);
+							for (i in 0...d.length) o.writeFloat(d[i]);
+						}
+						else if (isInt) { // Uint32Array
+							o.writeByte(0xd2);
+							for (i in 0...d.length) o.writeInt32(d[i]);
+						}
+						// else if (isInt16) {} // TODO: Int16Array
+						else for (i in 0...d.length) write(o, d[i]); // Array
+					}
+					case "haxe.io.Bytes": {
+						o.writeByte(0xc6);
+						o.writeInt32(d.length);
+						o.write(d);
+					}
+					default: {}
+				}
+			}
+			case TObject: {
+				var f = Reflect.fields(d);
+				o.writeByte(0xdf);
+				o.writeInt32(f.length);
+				for (k in f) {
+					o.writeByte(0xdb);
+					o.writeInt32(k.length);
+					o.writeString(k);
+					write(o, Reflect.field(d, k));
+				}
+			}
+			default: {}
+		}
+	}
+}
